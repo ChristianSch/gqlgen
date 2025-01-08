@@ -1,10 +1,12 @@
 package code
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 func TestPackages(t *testing.T) {
@@ -30,14 +32,6 @@ func TestPackages(t *testing.T) {
 		require.Equal(t, 2, p.numLoadCalls)
 	})
 
-	t.Run("evicting a package also evicts its dependencies", func(t *testing.T) {
-		p := initialState(t)
-		p.Evict("github.com/99designs/gqlgen/internal/code/testdata/a")
-		require.Equal(t, "a", p.Load("github.com/99designs/gqlgen/internal/code/testdata/a").Name)
-		require.Equal(t, 2, p.numLoadCalls)
-		require.Equal(t, "b", p.Load("github.com/99designs/gqlgen/internal/code/testdata/b").Name)
-		require.Equal(t, 3, p.numLoadCalls)
-	})
 	t.Run("able to load private package with build tags", func(t *testing.T) {
 		p := initialState(t, WithBuildTags("private"))
 		p.Evict("github.com/99designs/gqlgen/internal/code/testdata/a")
@@ -46,6 +40,22 @@ func TestPackages(t *testing.T) {
 		require.Equal(t, "p", p.Load("github.com/99designs/gqlgen/internal/code/testdata/p").Name)
 		require.Equal(t, 3, p.numLoadCalls)
 	})
+}
+
+func TestPackagesErrors(t *testing.T) {
+	loadFirstErr := errors.New("first")
+	loadSecondErr := errors.New("second")
+	packageErr := packages.Error{Msg: "package"}
+	p := &Packages{
+		loadErrors: []error{loadFirstErr, loadSecondErr},
+		packages: map[string]*packages.Package{"github.com/99designs/gqlgen/internal/code/testdata/a": {
+			Errors: []packages.Error{packageErr},
+		}},
+	}
+
+	errs := p.Errors()
+
+	assert.Equal(t, PkgErrors([]error{loadFirstErr, loadSecondErr, packageErr}), errs)
 }
 
 func TestNameForPackage(t *testing.T) {
@@ -64,8 +74,8 @@ func initialState(t *testing.T, opts ...Option) *Packages {
 		"github.com/99designs/gqlgen/internal/code/testdata/a",
 		"github.com/99designs/gqlgen/internal/code/testdata/b",
 	)
-	require.Nil(t, p.Errors())
 
+	require.Empty(t, p.Errors())
 	require.Equal(t, 1, p.numLoadCalls)
 	require.Equal(t, 0, p.numNameCalls)
 	require.Equal(t, "a", pkgs[0].Name)

@@ -86,15 +86,16 @@ func TestSubscriptions(t *testing.T) {
 		return res, nil
 	}
 
-	srv := handler.NewDefaultServer(
-		NewExecutableSchema(Config{Resolvers: resolvers}),
-	)
-	srv.AroundFields(func(ctx context.Context, next graphql.Resolver) (res interface{}, err error) {
+	srv := handler.New(NewExecutableSchema(Config{Resolvers: resolvers}))
+	srv.AddTransport(transport.Websocket{
+		KeepAlivePingInterval: time.Second,
+	})
+	srv.AroundFields(func(ctx context.Context, next graphql.Resolver) (res any, err error) {
 		path, _ := ctx.Value(ckey("path")).([]int)
 		return next(context.WithValue(ctx, ckey("path"), append(path, 1)))
 	})
 
-	srv.AroundFields(func(ctx context.Context, next graphql.Resolver) (res interface{}, err error) {
+	srv.AroundFields(func(ctx context.Context, next graphql.Resolver) (res any, err error) {
 		path, _ := ctx.Value(ckey("path")).([]int)
 		return next(context.WithValue(ctx, ckey("path"), append(path, 2)))
 	})
@@ -133,7 +134,7 @@ func TestSubscriptions(t *testing.T) {
 		runtime.GC() // ensure no go-routines left from preceding tests
 		initialGoroutineCount := runtime.NumGoroutine()
 
-		sub := c.WebsocketWithPayload(`subscription { initPayload }`, map[string]interface{}{
+		sub := c.WebsocketWithPayload(`subscription { initPayload }`, map[string]any{
 			"Authorization": "Bearer of the curse",
 			"number":        32,
 			"strings":       []string{"hello", "world"},

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,17 +48,17 @@ func TestApolloTracing(t *testing.T) {
 
 	tracing := respData.Extensions.FTV1
 	pbuf, err := base64.StdEncoding.DecodeString(tracing)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	ftv1 := &generated.Trace{}
 	err = proto.Unmarshal(pbuf, ftv1)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	require.NotZero(t, ftv1.StartTime.Nanos)
 	require.Less(t, ftv1.StartTime.Nanos, ftv1.EndTime.Nanos)
 	require.EqualValues(t, ftv1.EndTime.Nanos-ftv1.StartTime.Nanos, ftv1.DurationNs)
 
-	fmt.Printf("%#v\n", resp.Body.String())
+	t.Logf("%#v\n", resp.Body.String())
 	require.Equal(t, "Query", ftv1.Root.Child[0].ParentType)
 	require.Equal(t, "name", ftv1.Root.Child[0].GetResponseName())
 	require.Equal(t, "String!", ftv1.Root.Child[0].Type)
@@ -78,16 +77,23 @@ func TestApolloTracing_Concurrent(t *testing.T) {
 					FTV1 string `json:"ftv1"`
 				} `json:"extensions"`
 			}
-			require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &respData))
+
+			err := json.Unmarshal(resp.Body.Bytes(), &respData)
+			if !assert.NoError(t, err) {
+				return
+			}
 
 			tracing := respData.Extensions.FTV1
 			pbuf, err := base64.StdEncoding.DecodeString(tracing)
-			require.Nil(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 
 			ftv1 := &generated.Trace{}
 			err = proto.Unmarshal(pbuf, ftv1)
-			require.Nil(t, err)
-			require.NotZero(t, ftv1.StartTime.Nanos)
+			if assert.NoError(t, err) {
+				assert.NotZero(t, ftv1.StartTime.Nanos)
+			}
 		}()
 	}
 }
@@ -95,7 +101,7 @@ func TestApolloTracing_Concurrent(t *testing.T) {
 func TestApolloTracing_withFail(t *testing.T) {
 	h := testserver.New()
 	h.AddTransport(transport.POST{})
-	h.Use(extension.AutomaticPersistedQuery{Cache: lru.New(100)})
+	h.Use(extension.AutomaticPersistedQuery{Cache: lru.New[string](100)})
 	h.Use(&apollofederatedtracingv1.Tracer{})
 
 	resp := doRequest(h, http.MethodPost, "/graphql", `{"operationName":"A","extensions":{"persistedQuery":{"version":1,"sha256Hash":"338bbc16ac780daf81845339fbf0342061c1e9d2b702c96d3958a13a557083a6"}}}`)
@@ -118,7 +124,7 @@ func TestApolloTracing_withFail(t *testing.T) {
 func TestApolloTracing_withMissingOp(t *testing.T) {
 	h := testserver.New()
 	h.AddTransport(transport.POST{})
-	h.Use(extension.AutomaticPersistedQuery{Cache: lru.New(100)})
+	h.Use(extension.AutomaticPersistedQuery{Cache: lru.New[string](100)})
 	h.Use(&apollofederatedtracingv1.Tracer{})
 
 	resp := doRequest(h, http.MethodPost, "/graphql", `{}`)
@@ -141,12 +147,14 @@ func TestApolloTracing_withUnexpectedEOF(t *testing.T) {
 	resp := doRequestWithReader(h, http.MethodPost, "/graphql", &alwaysError{})
 	assert.Equal(t, http.StatusOK, resp.Code)
 }
+
 func doRequest(handler http.Handler, method, target, body string) *httptest.ResponseRecorder {
 	return doRequestWithReader(handler, method, target, strings.NewReader(body))
 }
 
 func doRequestWithReader(handler http.Handler, method string, target string,
-	reader io.Reader) *httptest.ResponseRecorder {
+	reader io.Reader,
+) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, target, reader)
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("apollo-federation-include-trace", "ftv1")
