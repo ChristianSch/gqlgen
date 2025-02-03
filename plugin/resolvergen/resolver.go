@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +44,7 @@ func (m *Plugin) GenerateCode(data *codegen.Data) error {
 	case config.LayoutSingleFile:
 		return m.generateSingleFile(data)
 	case config.LayoutFollowSchema:
+
 		return m.generatePerSchema(data)
 	}
 
@@ -54,23 +54,49 @@ func (m *Plugin) GenerateCode(data *codegen.Data) error {
 func (m *Plugin) generateSingleFile(data *codegen.Data) error {
 	file := File{}
 
-	if _, err := os.Stat(data.Config.Resolver.Filename); err == nil {
-		// file already exists and we do not support updating resolvers with layout = single so just return
+	if fileExists(data.Config.Resolver.Filename) &&
+		data.Config.Resolver.PreserveResolver {
+		// file already exists and config says not to update resolver
+		// so just return
 		return nil
+	}
+
+	rewriter, err := rewrite.New(data.Config.Resolver.Dir())
+	if err != nil {
+		return err
 	}
 
 	for _, o := range data.Objects {
 		if o.HasResolvers() {
+			caser := cases.Title(language.English, cases.NoLower)
+			rewriter.MarkStructCopied(templates.LcFirst(o.Name) + templates.UcFirst(data.Config.Resolver.Type))
+			rewriter.GetMethodBody(data.Config.Resolver.Type, caser.String(o.Name))
+
 			file.Objects = append(file.Objects, o)
 		}
+
 		for _, f := range o.Fields {
 			if !f.IsResolver {
 				continue
 			}
 
-			resolver := Resolver{o, f, nil, "", `panic("not implemented")`, nil}
-			file.Resolvers = append(file.Resolvers, &resolver)
+			structName := templates.LcFirst(o.Name) + templates.UcFirst(data.Config.Resolver.Type)
+			comment := strings.TrimSpace(strings.TrimLeft(rewriter.GetMethodComment(structName, f.GoFieldName), `\`))
+			implementation := strings.TrimSpace(rewriter.GetMethodBody(structName, f.GoFieldName))
+			if implementation != "" {
+				resolver := Resolver{o, f, rewriter.GetPrevDecl(structName, f.GoFieldName), comment, implementation, nil}
+				file.Resolvers = append(file.Resolvers, &resolver)
+			} else {
+				resolver := Resolver{o, f, nil, "", `panic("not implemented")`, nil}
+				file.Resolvers = append(file.Resolvers, &resolver)
+			}
 		}
+	}
+
+	if fileExists(data.Config.Resolver.Filename) {
+		file.name = data.Config.Resolver.Filename
+		file.imports = rewriter.ExistingImports(file.name)
+		file.RemainingSource = rewriter.RemainingSource(file.name)
 	}
 
 	resolverBuild := &ResolverBuild{
@@ -86,9 +112,14 @@ func (m *Plugin) generateSingleFile(data *codegen.Data) error {
 		newResolverTemplate = readResolverTemplate(data.Config.Resolver.ResolverTemplate)
 	}
 
+	fileNotice := `// THIS CODE WILL BE UPDATED WITH SCHEMA CHANGES. PREVIOUS IMPLEMENTATION FOR SCHEMA CHANGES WILL BE KEPT IN THE COMMENT SECTION. IMPLEMENTATION FOR UNCHANGED SCHEMA WILL BE KEPT.`
+	if data.Config.Resolver.PreserveResolver {
+		fileNotice = `// THIS CODE IS A STARTING POINT ONLY. IT WILL NOT BE UPDATED WITH SCHEMA CHANGES.`
+	}
+
 	return templates.Render(templates.Options{
 		PackageName: data.Config.Resolver.Package,
-		FileNotice:  `// THIS CODE IS A STARTING POINT ONLY. IT WILL NOT BE UPDATED WITH SCHEMA CHANGES.`,
+		FileNotice:  fileNotice,
 		Filename:    data.Config.Resolver.Filename,
 		Data:        resolverBuild,
 		Packages:    data.Config.Packages,
@@ -127,14 +158,10 @@ func (m *Plugin) generatePerSchema(data *codegen.Data) error {
 			if !f.IsResolver {
 				continue
 			}
-
 			structName := templates.LcFirst(o.Name) + templates.UcFirst(data.Config.Resolver.Type)
+			// TODO(steve): Why do we need to trimLeft "\" here? Some bazel thing?
 			comment := strings.TrimSpace(strings.TrimLeft(rewriter.GetMethodComment(structName, f.GoFieldName), `\`))
 			implementation := strings.TrimSpace(rewriter.GetMethodBody(structName, f.GoFieldName))
-			if implementation == "" {
-				// use default implementation, if no implementation was previously used
-				implementation = fmt.Sprintf("panic(fmt.Errorf(\"not implemented: %v - %v\"))", f.GoFieldName, f.Name)
-			}
 			resolver := Resolver{o, f, rewriter.GetPrevDecl(structName, f.GoFieldName), comment, implementation, nil}
 			var implExists bool
 			for _, p := range data.Plugins {
@@ -143,7 +170,7 @@ func (m *Plugin) generatePerSchema(data *codegen.Data) error {
 					continue
 				}
 				if implExists {
-					return fmt.Errorf("multiple plugins implement ResolverImplementer")
+					return errors.New("multiple plugins implement ResolverImplementer")
 				}
 				implExists = true
 				resolver.ImplementationRender = rImpl.Implement
@@ -170,6 +197,11 @@ func (m *Plugin) generatePerSchema(data *codegen.Data) error {
 	}
 
 	for _, file := range files {
+		if fileExists(file.name) &&
+			data.Config.Resolver.PreserveResolver {
+			// file already exists and config says not to update resolver
+			continue
+		}
 		resolverBuild := &ResolverBuild{
 			File:                file,
 			PackageName:         data.Config.Resolver.Package,
@@ -203,7 +235,7 @@ func (m *Plugin) generatePerSchema(data *codegen.Data) error {
 		}
 	}
 
-	if _, err := os.Stat(data.Config.Resolver.Filename); errors.Is(err, fs.ErrNotExist) {
+	if !fileExists(data.Config.Resolver.Filename) {
 		err := templates.Render(templates.Options{
 			PackageName: data.Config.Resolver.Package,
 			FileNotice: `
@@ -257,17 +289,24 @@ type Resolver struct {
 	PrevDecl             *ast.FuncDecl
 	Comment              string
 	ImplementationStr    string
-	ImplementationRender func(r *codegen.Field) string
+	ImplementationRender func(prevImplementation string, r *codegen.Field) string
 }
 
 func (r *Resolver) Implementation() string {
 	if r.ImplementationRender != nil {
-		return r.ImplementationRender(r.Field)
+		// use custom implementation
+		return r.ImplementationRender(r.ImplementationStr, r.Field)
 	}
+	// if not implementation was previously used, use default implementation
+	if r.ImplementationStr == "" {
+		// use default implementation, if no implementation was previously used
+		return fmt.Sprintf("panic(fmt.Errorf(\"not implemented: %v - %v\"))", r.Field.GoFieldName, r.Field.Name)
+	}
+	// use previously used implementation
 	return r.ImplementationStr
 }
 
-func gqlToResolverName(base string, gqlname, filenameTmpl string) string {
+func gqlToResolverName(base, gqlname, filenameTmpl string) string {
 	gqlname = filepath.Base(gqlname)
 	ext := filepath.Ext(gqlname)
 	if filenameTmpl == "" {
@@ -283,4 +322,11 @@ func readResolverTemplate(customResolverTemplate string) string {
 		panic(err)
 	}
 	return string(contentBytes)
+}
+
+func fileExists(fileName string) bool {
+	if _, err := os.Stat(fileName); err == nil {
+		return true
+	}
+	return false
 }

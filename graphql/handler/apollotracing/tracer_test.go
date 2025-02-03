@@ -85,7 +85,7 @@ func TestApolloTracing_withFail(t *testing.T) {
 
 	h := testserver.New()
 	h.AddTransport(transport.POST{})
-	h.Use(extension.AutomaticPersistedQuery{Cache: lru.New(100)})
+	h.Use(extension.AutomaticPersistedQuery{Cache: lru.New[string](100)})
 	h.Use(apollotracing.Tracer{})
 
 	resp := doRequest(h, http.MethodPost, "/graphql", `{"operationName":"A","extensions":{"persistedQuery":{"version":1,"sha256Hash":"338bbc16ac780daf81845339fbf0342061c1e9d2b702c96d3958a13a557083a6"}}}`)
@@ -114,7 +114,8 @@ func doRequest(handler http.Handler, method, target, body string) *httptest.Resp
 }
 
 func doRequestWithReader(handler http.Handler, method string, target string,
-	reader io.Reader) *httptest.ResponseRecorder {
+	reader io.Reader,
+) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, target, reader)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
