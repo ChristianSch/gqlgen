@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/99designs/gqlgen/graphql/handler/extension"
 	"github.com/stretchr/testify/require"
 
 	"github.com/99designs/gqlgen/client"
@@ -21,7 +22,7 @@ func TestIntrospection(t *testing.T) {
 		srv.AddTransport(transport.POST{})
 		c := client.New(srv)
 
-		var resp interface{}
+		var resp any
 		err := c.Post(introspection.Query, &resp)
 		require.EqualError(t, err, "[{\"message\":\"introspection disabled\",\"path\":[\"__schema\"]}]")
 	})
@@ -29,11 +30,13 @@ func TestIntrospection(t *testing.T) {
 	t.Run("enabled by default", func(t *testing.T) {
 		resolvers := &Stub{}
 
-		c := client.New(handler.NewDefaultServer(
-			NewExecutableSchema(Config{Resolvers: resolvers}),
-		))
+		srv := handler.New(NewExecutableSchema(Config{Resolvers: resolvers}))
+		srv.AddTransport(transport.POST{})
+		srv.Use(extension.Introspection{})
 
-		var resp interface{}
+		c := client.New(srv)
+
+		var resp any
 		err := c.Post(introspection.Query, &resp)
 		require.NoError(t, err)
 
@@ -66,14 +69,15 @@ func TestIntrospection(t *testing.T) {
 	t.Run("disabled by middleware", func(t *testing.T) {
 		resolvers := &Stub{}
 
-		srv := handler.NewDefaultServer(NewExecutableSchema(Config{Resolvers: resolvers}))
+		srv := handler.New(NewExecutableSchema(Config{Resolvers: resolvers}))
+		srv.AddTransport(transport.POST{})
 		srv.AroundOperations(func(ctx context.Context, next graphql.OperationHandler) graphql.ResponseHandler {
 			graphql.GetOperationContext(ctx).DisableIntrospection = true
 			return next(ctx)
 		})
 		c := client.New(srv)
 
-		var resp interface{}
+		var resp any
 		err := c.Post(introspection.Query, &resp)
 		require.EqualError(t, err, "[{\"message\":\"introspection disabled\",\"path\":[\"__schema\"]}]")
 	})

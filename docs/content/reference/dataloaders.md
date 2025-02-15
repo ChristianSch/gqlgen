@@ -115,11 +115,9 @@ func (u *userReader) getUsers(ctx context.Context, userIDs []string) ([]*model.U
 	errs := make([]error, 0, len(userIDs))
 	for rows.Next() {
 		var user model.User
-		if err := rows.Scan(&user.ID, &user.Name); err != nil {
-			errs = append(errs, err)
-			continue
-		}
+		err := rows.Scan(&user.ID, &user.Name)
 		users = append(users, &user)
+		errs = append(errs, err)
 	}
 	return users, errs
 }
@@ -170,10 +168,13 @@ func GetUsers(ctx context.Context, userIDs []string) ([]*model.User, error) {
 Add the dataloader middleware to your server...
 ```go
 // create the query handler
-var srv http.Handler = handler.NewDefaultServer(generated.NewExecutableSchema(...))
+h := handler.New(generated.NewExecutableSchema(...))
+h.AddTransport(transport.POST{})
+
 // wrap the query handler with middleware to inject dataloader in requests.
 // pass in your dataloader dependencies, in this case the db connection.
-srv = loaders.Middleware(db, srv)
+srv = loaders.Middleware(db, h)
+
 // register the wrapped handler
 http.Handle("/query", srv)
 ```
